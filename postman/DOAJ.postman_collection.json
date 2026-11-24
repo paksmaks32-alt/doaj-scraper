@@ -1,0 +1,143 @@
+{
+  "info": {
+    "name": "DOAJ — дослідження API",
+    "description": "Запити до DOAJ, знайдені через DevTools → Network. Ті самі запити робить Java-програма doaj-scraper.\n\nПорядок: 1 → 2 (можна натискати кілька разів) → 3 → 4.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base", "value": "https://doaj.org" },
+    { "key": "page_size", "value": "5" },
+    { "key": "issn", "value": "2675-0805" },
+    { "key": "search_after", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. Пошук журналів — перша сторінка",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": { "type": "text/javascript", "exec": [
+            "// Формуємо JSON-запит до Elasticsearch (параметр source), як це робить сторінка пошуку DOAJ",
+            "const q = {",
+            "  query: { match_all: {} },",
+            "  size: Number(pm.collectionVariables.get('page_size')),",
+            "  sort: [ { created_date: { order: 'desc' } }, { 'id.exact': { order: 'asc' } } ],",
+            "  track_total_hits: true",
+            "};",
+            "pm.collectionVariables.set('search_after', '');",
+            "pm.variables.set('source', encodeURIComponent(JSON.stringify(q)));",
+            "console.log('source =', JSON.stringify(q, null, 2));"
+          ] }
+        },
+        {
+          "listen": "test",
+          "script": { "type": "text/javascript", "exec": [
+            "pm.test('Статус 200', () => pm.response.to.have.status(200));",
+            "// Знімаємо JSONP-обгортку callback(...), якщо вона є",
+            "let t = pm.response.text().trim();",
+            "if (!t.startsWith('{')) t = t.substring(t.indexOf('(') + 1, t.lastIndexOf(')'));",
+            "const data = JSON.parse(t);",
+            "const hits = data.hits.hits;",
+            "pm.test('Отримано журнали', () => pm.expect(hits.length).to.be.above(0));",
+            "console.log('Усього журналів у DOAJ:', data.hits.total.value);",
+            "hits.forEach((h, i) => console.log(i + 1, h._source.bibjson.title, '| eissn:', h._source.bibjson.eissn, '| sort:', JSON.stringify(h.sort)));",
+            "// Запам'ятовуємо значення сортування останнього журналу — для запиту 2 (search_after)",
+            "pm.collectionVariables.set('search_after', JSON.stringify(hits[hits.length - 1].sort));",
+            "pm.collectionVariables.set('issn', hits[0]._source.bibjson.eissn || hits[0]._source.bibjson.pissn);"
+          ] }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Accept", "value": "application/json, text/javascript, */*; q=0.01" },
+          { "key": "X-Requested-With", "value": "XMLHttpRequest" },
+          { "key": "Referer", "value": "{{base}}/search/journals" }
+        ],
+        "url": { "raw": "{{base}}/query/journal/_search?ref=public_journal&source={{source}}" }
+      }
+    },
+    {
+      "name": "2. Пошук журналів — наступна сторінка (search_after)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": { "type": "text/javascript", "exec": [
+            "// Те саме, але з search_after: 'дай наступні журнали ПІСЛЯ останнього з попередньої сторінки'",
+            "const sa = pm.collectionVariables.get('search_after');",
+            "if (!sa) throw new Error('Спершу виконайте запит 1');",
+            "const q = {",
+            "  query: { match_all: {} },",
+            "  size: Number(pm.collectionVariables.get('page_size')),",
+            "  sort: [ { created_date: { order: 'desc' } }, { 'id.exact': { order: 'asc' } } ],",
+            "  track_total_hits: true,",
+            "  search_after: JSON.parse(sa)",
+            "};",
+            "pm.variables.set('source', encodeURIComponent(JSON.stringify(q)));",
+            "console.log('search_after =', sa);"
+          ] }
+        },
+        {
+          "listen": "test",
+          "script": { "type": "text/javascript", "exec": [
+            "pm.test('Статус 200', () => pm.response.to.have.status(200));",
+            "let t = pm.response.text().trim();",
+            "if (!t.startsWith('{')) t = t.substring(t.indexOf('(') + 1, t.lastIndexOf(')'));",
+            "const hits = JSON.parse(t).hits.hits;",
+            "pm.test('Отримано наступну порцію', () => pm.expect(hits.length).to.be.above(0));",
+            "hits.forEach((h, i) => console.log(i + 1, h._source.bibjson.title, '| sort:', JSON.stringify(h.sort)));",
+            "pm.collectionVariables.set('search_after', JSON.stringify(hits[hits.length - 1].sort));"
+          ] }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Accept", "value": "application/json, text/javascript, */*; q=0.01" },
+          { "key": "X-Requested-With", "value": "XMLHttpRequest" },
+          { "key": "Referer", "value": "{{base}}/search/journals" }
+        ],
+        "url": { "raw": "{{base}}/query/journal/_search?ref=public_journal&source={{source}}" }
+      }
+    },
+    {
+      "name": "3. Сторінка журналу /toc/{issn} (HTML)",
+      "event": [
+        {
+          "listen": "test",
+          "script": { "type": "text/javascript", "exec": [
+            "const body = pm.response.text();",
+            "const cf = pm.response.headers.has('cf-mitigated') || body.includes('challenge-platform') || body.includes('<title>Just a moment');",
+            "console.log('HTTP', pm.response.code, cf ? '— БЛОК Cloudflare' : '— сторінку отримано', ', розмір', body.length, 'символів');",
+            "pm.test('Cloudflare пропустив', () => pm.expect(cf).to.be.false);"
+          ] }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Accept", "value": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" }
+        ],
+        "url": { "raw": "{{base}}/toc/{{issn}}" }
+      }
+    },
+    {
+      "name": "4. Офіційне API DOAJ — журнал за ISSN",
+      "event": [
+        {
+          "listen": "test",
+          "script": { "type": "text/javascript", "exec": [
+            "pm.test('Статус 200', () => pm.response.to.have.status(200));",
+            "const d = pm.response.json();",
+            "console.log('Знайдено:', d.total, '| назва:', d.results && d.results[0] && d.results[0].bibjson.title);"
+          ] }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "Accept", "value": "application/json" } ],
+        "url": { "raw": "{{base}}/api/search/journals/issn%3A{{issn}}" }
+      }
+    }
+  ]
+}
